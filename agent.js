@@ -9,6 +9,9 @@ const HOME_CITY = "Lübeck";
 const RADIUS_KM = 100;
 const CHECK_INTERVAL_MS = Number(process.env.JOB_CHECK_INTERVAL_MS || 24 * 60 * 60 * 1000);
 const JOBS_FILE = "jobs.json";
+const PORTFOLIO_DIR = process.env.PORTFOLIO_DIR || "c:\\Users\\user\\Desktop\\IT-administration--Portofolio";
+const PORTFOLIO_JOBS_FILE = `${PORTFOLIO_DIR}\\jobs.json`;
+const PORTFOLIO_STATUS_FILE = `${PORTFOLIO_DIR}\\status.json`;
 
 const ADZUNA_SEARCH_QUERIES = [
   "IT Systemadministrator",
@@ -111,6 +114,45 @@ function loadOldJobs() {
 
 function saveJobs(jobs) {
   fs.writeFileSync(JOBS_FILE, JSON.stringify(jobs, null, 2));
+}
+
+function savePortfolioFiles(allJobs, newJobsCount) {
+  try {
+    fs.writeFileSync(PORTFOLIO_JOBS_FILE, JSON.stringify(allJobs, null, 2));
+
+    const status = {
+      lastRun: new Date().toISOString(),
+      newJobsFound: newJobsCount,
+      totalJobs: allJobs.length,
+      status: newJobsCount > 0 ? "new_jobs_found" : "no_new_jobs",
+    };
+
+    fs.writeFileSync(PORTFOLIO_STATUS_FILE, JSON.stringify(status, null, 2));
+    console.log(`✍️  Portfolio-Dateien aktualisiert: ${PORTFOLIO_JOBS_FILE}`);
+  } catch (error) {
+    console.error("Fehler beim Speichern der Portfolio-Dateien:", error.message);
+  }
+}
+
+async function pushPortfolioToGitHub() {
+  try {
+    const { execSync } = await import("child_process");
+    console.log("🔄 Pushe Job-Ergebnisse zu GitHub...");
+
+    execSync(`cd "${PORTFOLIO_DIR}" && git add jobs.json status.json && git commit -m "Update job results $(date)" && git push`, {
+      encoding: "utf-8",
+      stdio: "pipe",
+    });
+
+    console.log("✅ GitHub Push erfolgreich!");
+  } catch (error) {
+    const message = error.message || error.toString();
+    if (message.includes("nothing to commit") || message.includes("no changes added")) {
+      console.log("ℹ️  Keine neuen Job-Dateien zum Pushen.");
+    } else {
+      console.error("GitHub Push fehlgeschlagen:", message);
+    }
+  }
 }
 
 function detectNewJobs(oldJobs, newJobs) {
@@ -242,7 +284,11 @@ async function runAgent() {
 
   await sendEmail(newJobs);
 
-  saveJobs([...oldJobs, ...newJobs]);
+  const allKnownJobs = [...oldJobs, ...newJobs];
+  saveJobs(allKnownJobs);
+  savePortfolioFiles(allKnownJobs, newJobs.length);
+
+  await pushPortfolioToGitHub();
 }
 
 async function startDailyLoop() {
