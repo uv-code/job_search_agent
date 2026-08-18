@@ -7,7 +7,7 @@
     "start": "node agent.js --api",
     "api": "node agent.js --api",
     "daily": "node agent.js --daily",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node -e \"console.log('No tests configured for job_agent; skipping.');\""
   },
   "keywords": [],
   "author": "",
