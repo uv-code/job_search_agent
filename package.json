@@ -4,7 +4,9 @@
   "description": "",
   "main": "agent.js",
   "scripts": {
-    "start": "node agent.js",
+    "start": "node agent.js --api",
+    "api": "node agent.js --api",
+    "daily": "node agent.js --daily",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -13,8 +15,10 @@
   "type": "module",
   "dependencies": {
     "ai": "^7.0.66",
+    "axios": "^1.19.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
+    "express": "^4.21.2",
     "node-fetch": "^3.3.2",
     "nodemailer": "^7.0.13",
     "openai": "^7.4.0"

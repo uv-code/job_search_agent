@@ -1,5 +1,6 @@
 import fs from "node:fs";
-import fetch from "node-fetch";
+import express from "express";
+import axios from "axios";
 import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 
@@ -42,17 +43,13 @@ async function fetchAdzunaJobs() {
     const url = `https://api.adzuna.com/v1/api/jobs/de/search/1?app_id=${encodeURIComponent(appId)}&app_key=${encodeURIComponent(apiKey)}&results_per_page=10&what=${encodeURIComponent(query)}&where=${encodeURIComponent(HOME_CITY)}&distance=${RADIUS_KM}`;
 
     try {
-      const response = await fetch(url, {
+      const response = await axios.get(url, {
         headers: {
           Accept: "application/json",
         },
       });
 
-      if (!response.ok) {
-        throw new Error(`Adzuna HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = response.data || {};
       const results = Array.isArray(data.results) ? data.results : [];
 
       for (const job of results) {
@@ -78,8 +75,13 @@ async function fetchAdzunaJobs() {
   return jobs;
 }
 
-async function fetchJobs() {
-  return fetchAdzunaJobs();
+export async function fetchLatestJobs() {
+  const results = await fetchAdzunaJobs();
+  const uniqueResults = results.filter(
+    (job, index, arr) => arr.findIndex((item) => item.url === job.url) === index,
+  );
+
+  return filterJobs(uniqueResults);
 }
 
 function filterJobs(jobs) {
@@ -250,17 +252,14 @@ async function sendEmail(newJobs) {
   console.log(`📧 E-Mail für ${newJobs.length} neue Jobs wurde versendet.`);
 }
 
-async function runAgent() {
+export async function runAgent() {
   console.log("🔍 Checking for new jobs...");
 
-  const results = await fetchJobs();
-  const filtered = filterJobs(
-    results.filter((job, index, arr) => arr.findIndex((item) => item.url === job.url) === index),
-  );
+  const filtered = await fetchLatestJobs();
 
   if (filtered.length === 0) {
     console.log("Keine passenden Adzuna-Stellen gefunden. Prüfe später erneut oder ergänze die Keywords.");
-    return;
+    return { jobs: [], status: { status: "no_new_jobs", totalJobs: 0, newJobsFound: 0 } };
   }
 
   const oldJobs = loadOldJobs();
@@ -272,9 +271,22 @@ async function runAgent() {
     source: job.source || "Adzuna",
   })));
 
+  const nextJobs = [...oldJobs, ...newJobs].slice(-2000);
+  const lastRun = new Date().toISOString();
+
   if (newJobs.length === 0) {
     console.log("Keine neuen Jobs heute.");
-    return;
+    saveJobs(nextJobs);
+    savePortfolioFiles(nextJobs, 0);
+    return {
+      jobs: filtered,
+      status: {
+        lastRun,
+        newJobsFound: 0,
+        totalJobs: nextJobs.length,
+        status: "no_new_jobs",
+      },
+    };
   }
 
   console.log(`Neue Jobs gefunden: ${newJobs.length}`);
@@ -289,6 +301,84 @@ async function runAgent() {
   savePortfolioFiles(allKnownJobs, newJobs.length);
 
   await pushPortfolioToGitHub();
+
+  return {
+    jobs: filtered,
+    status: {
+      lastRun,
+      newJobsFound: newJobs.length,
+      totalJobs: allKnownJobs.length,
+      status: "new_jobs_found",
+    },
+  };
+}
+
+function applyCors(req, res, next) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+
+  next();
+}
+
+async function handleAgentRequest(req, res) {
+  try {
+    const payload = await fetchLatestJobs();
+
+    res.json({
+      jobs: payload,
+      status: {
+        lastRun: new Date().toISOString(),
+        newJobsFound: payload.length,
+        totalJobs: payload.length,
+        status: "new_jobs_found",
+      },
+    });
+  } catch (error) {
+    console.error("Agent request failed:", error);
+    res.status(500).json({
+      error: "Agent failed to fetch jobs",
+      details: error.message,
+    });
+  }
+}
+
+async function startApiServer() {
+  const app = express();
+  const port = Number(process.env.PORT || 3001);
+
+  app.use(express.json());
+  app.use(applyCors);
+
+  app.get("/updateJobs", async (req, res) => {
+    await handleAgentRequest(req, res);
+  });
+
+  app.post("/updateJobs", async (req, res) => {
+    await handleAgentRequest(req, res);
+  });
+
+  app.get("/copilot-agent/updateJobs", async (req, res) => {
+    await handleAgentRequest(req, res);
+  });
+
+  app.post("/copilot-agent/updateJobs", async (req, res) => {
+    await handleAgentRequest(req, res);
+  });
+
+  app.get("/health", (req, res) => {
+    res.json({ status: "ok" });
+  });
+
+  app.listen(port, () => {
+    console.log(`🤖 Azure-ready Job Agent is running on http://localhost:${port}`);
+    console.log("📡 Endpoints: /updateJobs and /copilot-agent/updateJobs");
+  });
 }
 
 async function startDailyLoop() {
@@ -308,4 +398,10 @@ async function startDailyLoop() {
   }, CHECK_INTERVAL_MS);
 }
 
-startDailyLoop();
+if (process.argv.includes("--api") || process.argv.includes("--serve") || process.env.AZURE_APP_SERVICE === "true") {
+  startApiServer();
+} else if (process.argv.includes("--daily")) {
+  startDailyLoop();
+} else {
+  startDailyLoop();
+}
