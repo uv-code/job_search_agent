@@ -481,9 +481,12 @@ async function startApiServer() {
         fs.writeFileSync(VISIT_COUNTER_FILE, JSON.stringify(data, null, 2));
       }
 
+      const totalUniqueVisitors = Number(data.count || existingIps.length || 0);
+
       res.json({
         visitorIp: ip,
-        totalUniqueVisitors: Number(data.count || existingIps.length || 0),
+        totalVisits: totalUniqueVisitors,
+        totalUniqueVisitors,
         alreadyCounted,
       });
     } catch (error) {
