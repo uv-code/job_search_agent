@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import express from "express";
 import axios from "axios";
 import nodemailer from "nodemailer";
@@ -10,9 +11,24 @@ const HOME_CITY = "Lübeck";
 const RADIUS_KM = 100;
 const CHECK_INTERVAL_MS = Number(process.env.JOB_CHECK_INTERVAL_MS || 24 * 60 * 60 * 1000);
 const JOBS_FILE = "jobs.json";
-const PORTFOLIO_DIR = process.env.PORTFOLIO_DIR || "c:\\Users\\user\\Desktop\\IT-administration--Portofolio";
-const PORTFOLIO_JOBS_FILE = `${PORTFOLIO_DIR}\\jobs.json`;
-const PORTFOLIO_STATUS_FILE = `${PORTFOLIO_DIR}\\status.json`;
+const STATE_FILE = "state.json";
+const FALLBACK_JOBS_FILE = "public/jobs.json";
+const VISIT_COUNTER_FILE = path.join(process.cwd(), "data", "counter.json");
+const PORTFOLIO_DIR = process.env.PORTFOLIO_DIR || "";
+const PORTFOLIO_JOBS_FILE = PORTFOLIO_DIR ? path.join(PORTFOLIO_DIR, "jobs.json") : "";
+const PORTFOLIO_STATUS_FILE = PORTFOLIO_DIR ? path.join(PORTFOLIO_DIR, "status.json") : "";
+const fsPromises = fs.promises;
+
+function ensureVisitCounterFile() {
+  const dir = path.dirname(VISIT_COUNTER_FILE);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  if (!fs.existsSync(VISIT_COUNTER_FILE)) {
+    fs.writeFileSync(VISIT_COUNTER_FILE, JSON.stringify({ count: 0 }, null, 2));
+  }
+}
 
 const ADZUNA_SEARCH_QUERIES = [
   "IT Systemadministrator",
@@ -28,13 +44,34 @@ const ADZUNA_SEARCH_QUERIES = [
   "Cloud Administrator",
 ];
 
+function loadFallbackJobs() {
+  const candidateFiles = [JOBS_FILE, FALLBACK_JOBS_FILE];
+
+  for (const filePath of candidateFiles) {
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const raw = fs.readFileSync(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    } catch (error) {
+      console.warn(`Warnung beim Laden von Fallback-Datei ${filePath}:`, error.message);
+    }
+  }
+
+  return [];
+}
+
 async function fetchAdzunaJobs() {
   const appId = process.env.ADZUNA_APP_ID;
   const apiKey = process.env.ADZUNA_API_KEY;
 
   if (!appId || !apiKey) {
-    console.log("⚠️ Adzuna API nicht konfiguriert. Setze ADZUNA_APP_ID und ADZUNA_API_KEY in .env");
-    return [];
+    const cachedJobs = loadFallbackJobs();
+    console.log("⚠️ Adzuna API nicht konfiguriert. Setze ADZUNA_APP_ID und ADZUNA_API_KEY in Azure App Settings oder .env.");
+    console.log(`ℹ️  Fallback auf gecachte Jobs: ${cachedJobs.length} Einträge`);
+    return cachedJobs;
   }
 
   const jobs = [];
@@ -87,31 +124,47 @@ export async function fetchLatestJobs() {
 function filterJobs(jobs) {
   return jobs.filter((job) => {
     const title = (job.title || "").toLowerCase();
+    const company = (job.company_name || "").toLowerCase();
+    const haystack = `${title} ${company}`;
+
     return (
-      title.includes("it-systemadministrator") ||
-      title.includes("it administrator") ||
-      title.includes("it support") ||
-      title.includes("system administrator") ||
-      title.includes("system engineer") ||
-      title.includes("windows administrator") ||
-      title.includes("windows") ||
-      title.includes("microsoft") ||
-      title.includes("azure") ||
-      title.includes("cloud") ||
-      title.includes("systemadministrator") ||
-      title.includes("support engineer") ||
-      title.includes("helpdesk") ||
-      title.includes("cloud engineer") ||
-      title.includes("m365") ||
-      title.includes("administrator")
+      haystack.includes("it-systemadministrator") ||
+      haystack.includes("systemadministrator") ||
+      haystack.includes("it administrator") ||
+      haystack.includes("it-admin") ||
+      haystack.includes("it support") ||
+      haystack.includes("support engineer") ||
+      haystack.includes("system administrator") ||
+      haystack.includes("system engineer") ||
+      haystack.includes("windows administrator") ||
+      haystack.includes("windows server") ||
+      haystack.includes("windows") ||
+      haystack.includes("microsoft") ||
+      haystack.includes("azure") ||
+      haystack.includes("cloud") ||
+      haystack.includes("helpdesk") ||
+      haystack.includes("cloud engineer") ||
+      haystack.includes("m365") ||
+      haystack.includes("administrator") ||
+      haystack.includes("desktop support") ||
+      haystack.includes("network administrator") ||
+      haystack.includes("service desk") ||
+      haystack.includes("it specialist") ||
+      haystack.includes("it operations")
     );
   });
 }
 
 function loadOldJobs() {
   if (!fs.existsSync(JOBS_FILE)) return [];
-  const raw = fs.readFileSync(JOBS_FILE, "utf8");
-  return JSON.parse(raw);
+  try {
+    const raw = fs.readFileSync(JOBS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.warn("Fehler beim Laden von jobs.json:", error.message);
+    return [];
+  }
 }
 
 function saveJobs(jobs) {
@@ -119,6 +172,11 @@ function saveJobs(jobs) {
 }
 
 function savePortfolioFiles(allJobs, newJobsCount) {
+  if (!PORTFOLIO_DIR || !fs.existsSync(PORTFOLIO_DIR)) {
+    console.log("ℹ️  PORTFOLIO_DIR nicht gesetzt oder nicht erreichbar. Überspringe Portfolio-Write für Azure.");
+    return;
+  }
+
   try {
     fs.writeFileSync(PORTFOLIO_JOBS_FILE, JSON.stringify(allJobs, null, 2));
 
@@ -137,6 +195,11 @@ function savePortfolioFiles(allJobs, newJobsCount) {
 }
 
 async function pushPortfolioToGitHub() {
+  if (!PORTFOLIO_DIR || !fs.existsSync(PORTFOLIO_DIR)) {
+    console.log("ℹ️  GitHub-Push übersprungen, da PORTFOLIO_DIR in Azure nicht gesetzt ist.");
+    return;
+  }
+
   try {
     const { execSync } = await import("child_process");
     console.log("🔄 Pushe Job-Ergebnisse zu GitHub...");
@@ -329,6 +392,7 @@ function applyCors(req, res, next) {
 async function handleAgentRequest(req, res) {
   try {
     const payload = await fetchLatestJobs();
+    const hasAdzunaConfig = Boolean(process.env.ADZUNA_APP_ID && process.env.ADZUNA_API_KEY);
 
     res.json({
       jobs: payload,
@@ -336,7 +400,7 @@ async function handleAgentRequest(req, res) {
         lastRun: new Date().toISOString(),
         newJobsFound: payload.length,
         totalJobs: payload.length,
-        status: "new_jobs_found",
+        status: hasAdzunaConfig ? (payload.length > 0 ? "new_jobs_found" : "no_new_jobs") : "fallback_cache",
       },
     });
   } catch (error) {
@@ -369,6 +433,35 @@ async function startApiServer() {
 
   app.post("/copilot-agent/updateJobs", async (req, res) => {
     await handleAgentRequest(req, res);
+  });
+
+  app.get("/visit", (req, res) => {
+    try {
+      ensureVisitCounterFile();
+
+      const forwardedFor = Array.isArray(req.headers["x-forwarded-for"])
+        ? req.headers["x-forwarded-for"][0]
+        : req.headers["x-forwarded-for"];
+
+      const ip = (forwardedFor || "").split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
+      const raw = fs.readFileSync(VISIT_COUNTER_FILE, "utf8");
+      const data = JSON.parse(raw || '{}');
+      const nextCount = Number(data.count || 0) + 1;
+
+      data.count = nextCount;
+      fs.writeFileSync(VISIT_COUNTER_FILE, JSON.stringify(data, null, 2));
+
+      res.json({
+        visitorIp: ip,
+        totalVisits: nextCount,
+      });
+    } catch (error) {
+      console.error("Visit counter failed:", error);
+      res.status(500).json({
+        error: "Visit counter failed",
+        details: error.message,
+      });
+    }
   });
 
   app.get("/health", (req, res) => {
