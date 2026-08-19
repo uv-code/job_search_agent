@@ -13,7 +13,7 @@ const CHECK_INTERVAL_MS = Number(process.env.JOB_CHECK_INTERVAL_MS || 24 * 60 * 
 const JOBS_FILE = "jobs.json";
 const STATE_FILE = "state.json";
 const FALLBACK_JOBS_FILE = "public/jobs.json";
-const VISIT_COUNTER_FILE = path.join(process.cwd(), "data", "counter.json");
+const VISIT_COUNTER_FILE = path.join(process.cwd(), "data", "visitors.json");
 const PORTFOLIO_DIR = process.env.PORTFOLIO_DIR || "";
 const PORTFOLIO_JOBS_FILE = PORTFOLIO_DIR ? path.join(PORTFOLIO_DIR, "jobs.json") : "";
 const PORTFOLIO_STATUS_FILE = PORTFOLIO_DIR ? path.join(PORTFOLIO_DIR, "status.json") : "";
@@ -26,8 +26,36 @@ function ensureVisitCounterFile() {
   }
 
   if (!fs.existsSync(VISIT_COUNTER_FILE)) {
-    fs.writeFileSync(VISIT_COUNTER_FILE, JSON.stringify({ count: 0 }, null, 2));
+    fs.writeFileSync(VISIT_COUNTER_FILE, JSON.stringify({ ips: [], count: 0 }, null, 2));
   }
+}
+
+function normalizeVisitorIp(req) {
+  const forwardedFor = Array.isArray(req.headers["x-forwarded-for"])
+    ? req.headers["x-forwarded-for"][0]
+    : req.headers["x-forwarded-for"];
+
+  const rawIp = (forwardedFor || "").split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
+  let ip = rawIp;
+
+  if (ip.startsWith("[") && ip.includes("]")) {
+    ip = ip.slice(1, ip.indexOf("]"));
+  }
+
+  ip = ip.replace(/^::ffff:/, "");
+
+  if (ip.includes(":") && ip.includes(".")) {
+    const lastColonIndex = ip.lastIndexOf(":");
+    if (lastColonIndex > ip.lastIndexOf(".")) {
+      ip = ip.slice(0, lastColonIndex);
+    }
+  }
+
+  return ip;
+}
+
+function shouldCountNewVisit(existingIps, nextIp) {
+  return !existingIps.includes(nextIp);
 }
 
 const ADZUNA_SEARCH_QUERIES = [
@@ -439,36 +467,24 @@ async function startApiServer() {
     try {
       ensureVisitCounterFile();
 
-      const forwardedFor = Array.isArray(req.headers["x-forwarded-for"])
-        ? req.headers["x-forwarded-for"][0]
-        : req.headers["x-forwarded-for"];
-
-      const rawIp = (forwardedFor || "").split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
-      let ip = rawIp;
-
-      if (ip.startsWith("[") && ip.includes("]")) {
-        ip = ip.slice(1, ip.indexOf("]"));
-      }
-
-      ip = ip.replace(/^::ffff:/, "");
-
-      if (ip.includes(":") && ip.includes(".")) {
-        const lastColonIndex = ip.lastIndexOf(":");
-        if (lastColonIndex > ip.lastIndexOf(".")) {
-          ip = ip.slice(0, lastColonIndex);
-        }
-      }
-
+      const ip = normalizeVisitorIp(req);
       const raw = fs.readFileSync(VISIT_COUNTER_FILE, "utf8");
       const data = JSON.parse(raw || '{}');
-      const nextCount = Number(data.count || 0) + 1;
 
-      data.count = nextCount;
-      fs.writeFileSync(VISIT_COUNTER_FILE, JSON.stringify(data, null, 2));
+      const existingIps = Array.isArray(data.ips) ? data.ips : [];
+      const alreadyCounted = existingIps.includes(ip);
+
+      if (!alreadyCounted) {
+        existingIps.push(ip);
+        data.ips = existingIps;
+        data.count = existingIps.length;
+        fs.writeFileSync(VISIT_COUNTER_FILE, JSON.stringify(data, null, 2));
+      }
 
       res.json({
         visitorIp: ip,
-        totalVisits: nextCount,
+        totalUniqueVisitors: Number(data.count || existingIps.length || 0),
+        alreadyCounted,
       });
     } catch (error) {
       console.error("Visit counter failed:", error);
