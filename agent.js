@@ -444,7 +444,21 @@ async function startApiServer() {
         : req.headers["x-forwarded-for"];
 
       const rawIp = (forwardedFor || "").split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
-      const ip = rawIp.replace(/:\d+$/, "");
+      let ip = rawIp;
+
+      if (ip.startsWith("[") && ip.includes("]")) {
+        ip = ip.slice(1, ip.indexOf("]"));
+      }
+
+      ip = ip.replace(/^::ffff:/, "");
+
+      if (ip.includes(":") && ip.includes(".")) {
+        const lastColonIndex = ip.lastIndexOf(":");
+        if (lastColonIndex > ip.lastIndexOf(".")) {
+          ip = ip.slice(0, lastColonIndex);
+        }
+      }
+
       const raw = fs.readFileSync(VISIT_COUNTER_FILE, "utf8");
       const data = JSON.parse(raw || '{}');
       const nextCount = Number(data.count || 0) + 1;
